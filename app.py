@@ -188,6 +188,8 @@ def build_driver():
         options=chrome_options
     )
 
+    driver.set_page_load_timeout(60)
+
     return driver
 
 
@@ -372,20 +374,80 @@ def run_scraper(
 
         log(f"Searching keyword: {keyword}")
 
+        # =====================================================
+        # HUMAN-LIKE SEARCH
+        # =====================================================
+
         search_url = f"https://www.amazon.fr/s?k={quote_plus(keyword)}"
 
         driver.get(search_url)
 
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located(
-                (
+        # wait for DOM
+        time.sleep(5)
+
+        # small human-like scroll
+        try:
+            driver.execute_script("window.scrollTo(0, 300)")
+            time.sleep(1)
+
+            driver.execute_script("window.scrollTo(0, 0)")
+            time.sleep(1)
+        except Exception:
+            pass
+
+        # =====================================================
+        # WAIT FOR PRODUCTS
+        # =====================================================
+
+        products_loaded = False
+
+        for _ in range(30):
+
+            try:
+
+                products = driver.find_elements(
                     By.CSS_SELECTOR,
                     'div[data-component-type="s-search-result"]'
                 )
-            )
+
+                if len(products) > 0:
+                    products_loaded = True
+                    break
+
+            except Exception:
+                pass
+
+            time.sleep(1)
+
+        log(
+            f"Current URL: {driver.current_url} | "
+            f"Title: {driver.title}"
         )
 
-        time.sleep(3)
+        if not products_loaded:
+
+            page_text = (
+                (driver.title or "") +
+                " " +
+                (driver.page_source or "")
+            ).lower()
+
+            if (
+                "captcha" in page_text
+                or
+                "robot" in page_text
+                or
+                "sorry" in page_text
+            ):
+                raise Exception(
+                    "Amazon blocked the scraper with CAPTCHA."
+                )
+
+            raise Exception(
+                "Amazon search results failed to load."
+            )
+
+        log("Search results loaded successfully")
 
         # =====================================================
         # SCROLL
