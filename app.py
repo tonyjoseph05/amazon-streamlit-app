@@ -405,16 +405,55 @@ def run_scraper(
         log(f"Search title: {driver.title}")
 
         if not ready:
+
             try:
                 driver.save_screenshot("amazon_search_failed.png")
+                log("Saved screenshot: amazon_search_failed.png")
             except Exception:
                 pass
 
-            page_text = (driver.title or "") + "\n" + (driver.page_source or "")
-            log("Search page did not expose product cards.")
-            log(page_text[:1000])
+        page_text = (
+            (driver.title or "") +
+            "\n" +
+            (driver.page_source or "")
+        ).lower()
 
-            raise Exception("Amazon search results failed to load.")
+        log("Search page did not expose product cards.")
+
+        # =====================================================
+        # AMAZON BLOCK PAGE
+        # =====================================================
+
+        if (
+                "toutes nos excuses" in page_text
+                or
+                "automated access" in page_text
+                or
+                "captcha" in page_text
+                or
+                "robot" in page_text
+        ):
+
+            log("Amazon blocked the scraper session.")
+            log("Returning empty dataframe safely.")
+
+            status_box.warning(
+                "Amazon temporarily blocked automated access."
+            )
+
+            return pd.DataFrame(product_data)
+
+        # =====================================================
+        # OTHER FAILURE
+        # =====================================================
+
+        log(page_text[:1000])
+
+        status_box.warning(
+            "Search results failed to load."
+        )
+
+        return pd.DataFrame(product_data)
 
         # =====================================================
         # HUMAN-LIKE SEARCH
