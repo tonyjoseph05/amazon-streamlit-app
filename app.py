@@ -306,13 +306,74 @@ def extract_structured_text(driver) -> str:
     return "\n".join(parts)
 
 
-def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
+# =========================================================
+# SCRAPER CORE
+# =========================================================
+
+def run_scraper(keyword: str, postal_code: str, output_csv: str, log_box, progress_bar, status_box) -> pd.DataFrame:
     """Run the scraper and return the final dataframe."""
 
+    def log(message: str):
+        existing = st.session_state.get("live_logs", [])
+        existing.append(message)
+        st.session_state["live_logs"] = existing
+
+        # keep last 200 messages to avoid huge UI slowdown
+        st.session_state["live_logs"] = st.session_state["live_logs"][-200:]
+        log_box.code("\n".join(st.session_state["live_logs"]), language="text")
+
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    import os
+
+    # =========================================================
+    # CHROME OPTIONS
+    # =========================================================
+
+    chrome_options = Options()
+
+    # Stable headless mode for Streamlit Cloud
+    chrome_options.add_argument("--headless=new")
+
+    # Required for cloud linux environments
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    # Prevent crashes
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+
+    # Better rendering size
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    # Prevent automation detection slightly
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+
+    # =========================================================
+    # CHROME BINARY LOCATION
+    # =========================================================
+
+    possible_paths = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            chrome_options.binary_location = path
+            break
+
+    # =========================================================
+    # CREATE DRIVER
+    # =========================================================
+
     driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install())
+        service=Service(ChromeDriverManager().install()),
+        options=chrome_options
     )
-    driver.maximize_window()
+
     wait = WebDriverWait(driver, 20)
 
     decorative_keywords = {
@@ -355,19 +416,21 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
     product_data: List[Dict[str, Any]] = []
 
     try:
+        log("Opening Amazon.fr")
         driver.get("https://www.amazon.fr")
         time.sleep(5)
 
-        # cookies
+        log("Accepting cookies if needed")
         try:
             cookie_button = wait.until(
                 EC.element_to_be_clickable((By.ID, "sp-cc-accept"))
             )
             cookie_button.click()
+            log("Cookies accepted")
         except Exception:
-            pass
+            log("No cookie popup")
 
-        # delivery
+        log(f"Setting delivery location to {postal_code}")
         try:
             delivery_button = wait.until(
                 EC.element_to_be_clickable((By.ID, "glow-ingress-block"))
@@ -389,10 +452,11 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
             )
             apply_button.click()
             time.sleep(4)
-        except Exception:
-            pass
+            log("Delivery location applied")
+        except Exception as e:
+            log(f"Delivery location error: {e}")
 
-        # search
+        log(f"Searching keyword: {keyword}")
         search_box = wait.until(
             EC.presence_of_element_located((By.ID, "twotabsearchtextbox"))
         )
@@ -400,7 +464,7 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
         search_box.send_keys(Keys.ENTER)
         time.sleep(5)
 
-        # scroll page
+        log("Scrolling full page to load products")
         last_height = driver.execute_script("return document.body.scrollHeight")
         while True:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -414,14 +478,11 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
         time.sleep(2)
 
         products = driver.find_elements(By.CSS_SELECTOR, 'div[data-component-type="s-search-result"]')
-        st.write(f"Products found: {len(products)}")
-
-        progress = st.progress(0)
-        status = st.empty()
+        log(f"Products found: {len(products)}")
 
         for position, product in enumerate(products, start=1):
-            status.write(f"Scraping position {position} / {len(products)}")
-            progress.progress(min(position / max(len(products), 1), 1.0))
+            status_box.text(f"Scraping position {position} / {len(products)}")
+            progress_bar.progress(min(position / max(len(products), 1), 1.0))
 
             try:
                 title = product.find_element(By.CSS_SELECTOR, "h2 span").text
@@ -431,6 +492,8 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
             if title in titles_seen:
                 continue
             titles_seen.add(title)
+
+            log(f"--- Position {position}: {title}")
 
             # sponsored
             sponsored = "NO"
@@ -488,7 +551,7 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
             except Exception:
                 continue
 
-            # open product tab
+            # open product page
             driver.execute_script("window.open(arguments[0]);", link)
             driver.switch_to.window(driver.window_handles[1])
             time.sleep(2)
@@ -524,10 +587,13 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
 
             # expand accordions
             expand_accordions(driver)
+            log("Accordions expanded")
 
             # BSR and style
             bsr = extract_bsr(driver)
             style = extract_style(driver)
+            log(f"BSR: {bsr}")
+            log(f"STYLE: {style}")
 
             # structured lines
             lines = (overview_block + "\n" + product_info).split("\n")
@@ -594,7 +660,7 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
                     waterproof_score += score
             waterproof = "YES" if waterproof_score >= 3 else "NO"
 
-            # competitor logic
+            # direct competitor
             material_lower = material.lower()
             shape_lower = shape.lower()
             price_match = False
@@ -611,6 +677,8 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
                 and price_match
             ):
                 direct_competitor = "YES"
+
+            log(f"DECORATIVE: {decorative} | WATERPROOF: {waterproof} | DIRECT COMPETITOR: {direct_competitor}")
 
             product_data.append({
                 "keyword": keyword,
@@ -637,14 +705,16 @@ def run_scraper(keyword: str, postal_code: str) -> pd.DataFrame:
             })
 
             pd.DataFrame(product_data).to_csv(output_csv, index=False, encoding="utf-8-sig")
+            log("CSV autosaved")
 
             # close product tab
             driver.close()
             driver.switch_to.window(driver.window_handles[0])
-            time.sleep(1.5)
+            time.sleep(1.2)
 
-        progress.progress(1.0)
-        status.success("Scraping complete")
+        status_box.success("Scraping complete")
+        progress_bar.progress(1.0)
+        log("FULL SCRAPE COMPLETE")
 
     finally:
         try:
@@ -666,9 +736,25 @@ with st.sidebar:
     output_file = st.text_input("Output CSV", value="amakw1.csv")
     start_button = st.button("Start scraping")
 
+st.subheader("Live logs")
+log_box = st.empty()
+progress_bar = st.progress(0.0)
+status_box = st.empty()
+
+if "live_logs" not in st.session_state:
+    st.session_state["live_logs"] = []
+
 if start_button:
+    st.session_state["live_logs"] = []
     with st.spinner("Running scraper..."):
-        df = run_scraper(keyword_input, postal_input)
+        df = run_scraper(
+            keyword_input,
+            postal_input,
+            output_file,
+            log_box,
+            progress_bar,
+            status_box
+        )
 
     st.subheader("Results")
     st.dataframe(df, use_container_width=True)
@@ -682,5 +768,3 @@ if start_button:
     )
 else:
     st.info("Enter a keyword in the sidebar and click Start scraping.")
-
-
