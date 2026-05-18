@@ -374,6 +374,48 @@ def run_scraper(
 
         log(f"Searching keyword: {keyword}")
 
+        search_url = f"https://www.amazon.fr/s?k={quote_plus(keyword)}"
+        driver.get(search_url)
+        time.sleep(3)
+
+        def has_products():
+            selectors = [
+                'div[data-component-type="s-search-result"]',
+                'div.s-main-slot div[data-asin]',
+                'div.s-result-item[data-asin]',
+            ]
+            for selector in selectors:
+                try:
+                    if driver.find_elements(By.CSS_SELECTOR, selector):
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        ready = False
+        end_time = time.time() + 30
+
+        while time.time() < end_time:
+            if has_products():
+                ready = True
+                break
+            time.sleep(1)
+
+        log(f"Search URL: {driver.current_url}")
+        log(f"Search title: {driver.title}")
+
+        if not ready:
+            try:
+                driver.save_screenshot("amazon_search_failed.png")
+            except Exception:
+                pass
+
+            page_text = (driver.title or "") + "\n" + (driver.page_source or "")
+            log("Search page did not expose product cards.")
+            log(page_text[:1000])
+
+            raise Exception("Amazon search results failed to load.")
+
         # =====================================================
         # HUMAN-LIKE SEARCH
         # =====================================================
@@ -640,26 +682,82 @@ def run_scraper(
 
             product_info_parts = []
 
-            for selector in [
+            selectors = [
+
+                # main detail tables
                 "#productDetails_detailBullets_sections1",
                 "#productDetails_techSpec_section_1",
-                "#detailBulletsWrapper_feature_div"
-            ]:
+
+                # bullet wrappers
+                "#detailBulletsWrapper_feature_div",
+                "#detailBullets_feature_div",
+
+                # overview
+                "#productOverview_feature_div",
+
+                # feature bullets
+                "#feature-bullets",
+
+                # additional info
+                "#aplus",
+
+                # technical details
+                "#technicalSpecifications_section_1",
+
+                # generic tables
+                "table.a-normal.a-spacing-micro",
+                "table.a-keyvalue",
+
+                # expandable sections
+                ".a-expander-content",
+
+            ]
+
+            seen_blocks = set()
+
+            for selector in selectors:
 
                 try:
 
-                    block = driver.find_element(
+                    elements = driver.find_elements(
                         By.CSS_SELECTOR,
                         selector
-                    ).text
+                    )
 
-                    if block:
-                        product_info_parts.append(block)
+                    for element in elements:
+
+                        try:
+
+                            text = clean_text(
+                                element.get_attribute("textContent")
+                                or
+                                element.text
+                            )
+
+                            if (
+                                text
+                                and
+                                len(text) > 20
+                                and
+                                text not in seen_blocks
+                            ):
+
+                                seen_blocks.add(text)
+
+                                product_info_parts.append(text)
+
+                        except Exception:
+                            pass
 
                 except Exception:
                     pass
 
-            product_info = "\n".join(product_info_parts)
+            product_info = "\n\n".join(product_info_parts)
+
+            log(
+                f"Collected product info blocks: "
+                f"{len(product_info_parts)}"
+            )
 
             # =================================================
             # EXPAND
